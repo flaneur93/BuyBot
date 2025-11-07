@@ -391,6 +391,7 @@ class BotWorker(QThread):
     def _bulk_loop(self) -> None:
         self.status_changed.emit("BULK_READY")
         target_price = self._params.max_price * max(1.0, self._params.buy_amount)
+        target_digits = len(f"{int(target_price):d}")
         self._emit_debug(f"BULK target price {self._format_money(target_price)}")
         while not self._stop_event.is_set():
             if not self._ensure_target_window():
@@ -416,6 +417,16 @@ class BotWorker(QThread):
                 attempts_remaining -= 1
             if price is None:
                 self._emit_debug("BULK price read failed; retrying from confirm.")
+                self._click_roi("cancel")
+                self._sleep_ms(self._params.action_delay_ms)
+                self._pending_confirm_delay = True
+                continue
+            price_digits = len(f"{int(price):d}")
+            if price_digits < target_digits - 1:
+                self._emit_debug(
+                    "BULK price digits mismatch",
+                    {"price": price, "digits": price_digits, "required": target_digits - 1},
+                )
                 self._click_roi("cancel")
                 self._sleep_ms(self._params.action_delay_ms)
                 self._pending_confirm_delay = True
