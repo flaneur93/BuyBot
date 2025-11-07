@@ -168,6 +168,12 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(form_box)
         self.simple_form_box = form_box
+        self.simple_form_layout = form_layout
+        self._simple_form_fields = [
+            self.max_price_spin,
+            self.current_balance_spin,
+            self.balance_floor_spin,
+        ]
 
         self.bulk_form_box = QGroupBox("Bulk Parameters")
         bulk_form = QFormLayout(self.bulk_form_box)
@@ -556,7 +562,12 @@ class MainWindow(QMainWindow):
 
     def _update_buy_method_ui(self) -> None:
         simple = self.current_buy_method != "bulk"
-        self.simple_form_box.setVisible(simple)
+        if hasattr(self, "simple_form_layout"):
+            for widget in getattr(self, "_simple_form_fields", []):
+                label = self.simple_form_layout.labelForField(widget)
+                if label:
+                    label.setVisible(simple)
+                widget.setVisible(simple)
         self.bulk_form_box.setVisible(not simple)
         self._populate_roi_grid()
         self._update_bulk_target_price()

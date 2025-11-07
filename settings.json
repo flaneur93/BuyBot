@@ -2,40 +2,40 @@
   "rois": {
     "simple": {
       "item": [
-        1930,
-        1850,
-        598,
-        68
+        784,
+        513,
+        364,
+        380
       ],
       "price": [
-        2252,
-        1724,
-        280,
-        60
+        2854,
+        1568,
+        183,
+        64
       ],
       "total": [
-        2254,
-        1719,
-        274,
-        66
+        2788,
+        1622,
+        243,
+        63
       ],
       "max": [
-        2900,
-        1462,
-        108,
-        62
+        2904,
+        1464,
+        98,
+        52
       ],
       "buy": [
-        1930,
-        1850,
-        598,
-        70
+        2595,
+        1704,
+        424,
+        54
       ],
       "close": [
-        1308,
-        1851,
-        603,
-        68
+        2132,
+        1702,
+        434,
+        60
       ],
       "balance": [
         3328,
@@ -80,11 +80,11 @@
   "min_price": 0.0,
   "max_price": 6.0,
   "balance_floor": 3000000.0,
-  "current_balance": 2817000.0,
+  "current_balance": 16774000.0,
   "target_window": "Arena Breakout Infinite",
-  "buy_method": "bulk",
-  "bulk_max_price": 6000.0,
-  "bulk_buy_amount": 2070.0,
+  "buy_method": "simple",
+  "bulk_max_price": 6500.0,
+  "bulk_buy_amount": 80.0,
   "delays": {
     "item_wait_ms": 100,
     "close_to_item_ms": 100,
