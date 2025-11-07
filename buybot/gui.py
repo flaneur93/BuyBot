@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -37,7 +38,7 @@ from PySide6.QtWidgets import (
 from .bot_worker import BotParams, BotWorker
 from .ocr import check_tesseract_available, read_price_average
 from .roi_overlay import RoiCaptureOverlay
-from .settings_manager import DEFAULT_DELAYS, ROI_ORDER, SettingsManager
+from .settings_manager import DEFAULT_DELAYS, SettingsManager
 from .trade_logger import TradeLogger
 
 
@@ -81,6 +82,7 @@ class MainWindow(QMainWindow):
         self.resize(820, 620)
         self._base_dir = Path(base_dir)
         self.settings = SettingsManager(self._base_dir)
+        self.current_buy_method = self.settings.get_buy_method().lower()
         self.trade_logger = TradeLogger(self._base_dir)
         self.worker: Optional[BotWorker] = None
         self._loading_settings = False
@@ -88,7 +90,11 @@ class MainWindow(QMainWindow):
         self._target_combo_updating = False
         self._money_locale = QLocale(QLocale.English, QLocale.UnitedStates)
         self._loading_delays = False
+        self._debug_history = deque()
+        self._debug_detail_history = deque()
+        self._debug_retention_seconds = 60
         self.delay_spinboxes: Dict[str, QSpinBox] = {}
+        self.current_buy_method = self.settings.get_buy_method().lower()
         self._delay_definitions = [
             ("item_wait_ms", "Item open delay (ms)", "Pause after clicking Item before reading prices."),
             ("close_to_item_ms", "Post-Close delay (ms)", "Wait after pressing Close before the next Item click."),
@@ -148,29 +154,48 @@ class MainWindow(QMainWindow):
         form_box = QGroupBox("Trading Parameters")
         form_layout = QFormLayout(form_box)
 
-        self.min_price_spin = self._make_money_spin()
+        self.buy_method_combo = QComboBox()
+        self.buy_method_combo.addItems(["Simple", "Bulk"])
         self.max_price_spin = self._make_money_spin()
         self.current_balance_spin = self._make_money_spin(max_value=None)
         self.balance_floor_spin = self._make_money_spin(max_value=None)
 
-        form_layout.addRow("Min Price", self.min_price_spin)
+        form_layout.addRow("Buy Method", self.buy_method_combo)
         form_layout.addRow("Max Price", self.max_price_spin)
         form_layout.addRow("Current Balance", self.current_balance_spin)
         form_layout.addRow("Balance Floor", self.balance_floor_spin)
 
-        target_row = QWidget()
-        target_row_layout = QHBoxLayout(target_row)
-        target_row_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(form_box)
+        self.simple_form_box = form_box
+
+        self.bulk_form_box = QGroupBox("Bulk Parameters")
+        bulk_form = QFormLayout(self.bulk_form_box)
+        self.bulk_max_price_spin = self._make_money_spin()
+        self.bulk_buy_amount_spin = QDoubleSpinBox()
+        self.bulk_buy_amount_spin.setDecimals(0)
+        self.bulk_buy_amount_spin.setRange(1, 1_000_000_000)
+        self.bulk_buy_amount_spin.setSingleStep(10)
+        self.bulk_target_price_label = QLabel("0")
+        self.bulk_target_price_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.bulk_target_price_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        bulk_form.addRow("Max Price", self.bulk_max_price_spin)
+        bulk_form.addRow("Buy Amount", self.bulk_buy_amount_spin)
+        bulk_form.addRow("Target Buy Price", self.bulk_target_price_label)
+        layout.addWidget(self.bulk_form_box)
+
+        target_group = QGroupBox("Target Window")
+        target_layout = QHBoxLayout(target_group)
+        target_layout.setContentsMargins(8, 8, 8, 8)
         self.target_combo = QComboBox()
         self.target_combo.setEditable(True)
         self.target_combo.setPlaceholderText("Select or type window title")
         self.target_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.target_refresh_button = QPushButton("Refresh")
-        target_row_layout.addWidget(self.target_combo)
-        target_row_layout.addWidget(self.target_refresh_button)
-        form_layout.addRow("Target Window", target_row)
+        target_layout.addWidget(self.target_combo)
+        target_layout.addWidget(self.target_refresh_button)
+        layout.addWidget(target_group)
 
-        layout.addWidget(form_box)
+        self._update_buy_method_ui()
 
         self.random_click_checkbox = QCheckBox("Randomize clicks inside ROI")
         self.random_click_checkbox.setChecked(False)
@@ -216,21 +241,11 @@ class MainWindow(QMainWindow):
         info_label = QLabel("Right-click or press ESC to cancel selection.")
         layout.addWidget(info_label)
 
-        grid = QGridLayout()
         self.roi_labels: Dict[str, QLabel] = {}
         self.roi_buttons: Dict[str, QPushButton] = {}
-
-        for row, name in enumerate(ROI_ORDER):
-            label = QLabel("Not set")
-            button = QPushButton(f"Select {name.title()} ROI")
-            button.clicked.connect(partial(self._handle_roi_selection, name))
-            self.roi_labels[name] = label
-            self.roi_buttons[name] = button
-            grid.addWidget(QLabel(name.title()), row, 0)
-            grid.addWidget(label, row, 1)
-            grid.addWidget(button, row, 2)
-
-        layout.addLayout(grid)
+        self.roi_grid_layout = QGridLayout()
+        layout.addLayout(self.roi_grid_layout)
+        self._populate_roi_grid()
         layout.addStretch()
 
     def _build_calculator_tab(self) -> None:
@@ -338,7 +353,6 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ wiring/setup
     def _wire_events(self) -> None:
-        self.min_price_spin.valueChanged.connect(lambda val: self._update_numeric_setting("min_price", val))
         self.max_price_spin.valueChanged.connect(lambda val: self._update_numeric_setting("max_price", val))
         self.balance_floor_spin.valueChanged.connect(lambda val: self._update_numeric_setting("balance_floor", val))
         self.current_balance_spin.valueChanged.connect(lambda val: self._update_numeric_setting("current_balance", val))
@@ -350,6 +364,9 @@ class MainWindow(QMainWindow):
             self.calc_tax_per_stack,
         ):
             spin.valueChanged.connect(self._recalc_calculator)
+        self.bulk_max_price_spin.valueChanged.connect(lambda val: self._handle_bulk_value_change("bulk_max_price", val))
+        self.bulk_buy_amount_spin.valueChanged.connect(lambda val: self._handle_bulk_value_change("bulk_buy_amount", val))
+        self.buy_method_combo.currentTextChanged.connect(self._on_buy_method_changed)
         self.target_combo.editTextChanged.connect(self._on_target_window_changed)
         self.target_refresh_button.clicked.connect(self._refresh_target_windows)
         self.start_button.clicked.connect(self._on_start)
@@ -359,12 +376,19 @@ class MainWindow(QMainWindow):
     def _load_settings_into_form(self) -> None:
         data = self.settings.as_dict()
         self._loading_settings = True
-        self.min_price_spin.setValue(data["min_price"])
         self.max_price_spin.setValue(data["max_price"])
         self.balance_floor_spin.setValue(data["balance_floor"])
         self.target_combo.setEditText(self.settings.get_target_window())
         self.current_balance_spin.setValue(data.get("current_balance", 0.0))
+        method = self.settings.get_buy_method().lower()
+        self.current_buy_method = method
+        index = 0 if method != "bulk" else 1
+        self.buy_method_combo.setCurrentIndex(index)
+        self.bulk_max_price_spin.setValue(data.get("bulk_max_price", 0.0))
+        self.bulk_buy_amount_spin.setValue(data.get("bulk_buy_amount", 1.0))
+        self._update_bulk_target_price()
         self._loading_settings = False
+        self._update_buy_method_ui()
 
     def _load_delay_values(self) -> None:
         if not self.delay_spinboxes:
@@ -388,12 +412,33 @@ class MainWindow(QMainWindow):
         self._load_delay_values()
 
     def _refresh_roi_labels(self) -> None:
-        for name in ROI_ORDER:
-            roi = self.settings.get_roi(name)
-            label = self.roi_labels.get(name)
-            if not label:
-                continue
+        method = self.current_buy_method
+        for name, label in self.roi_labels.items():
+            roi = self.settings.get_roi(name, method)
             label.setText(self._roi_to_text(roi))
+
+    def _populate_roi_grid(self) -> None:
+        if not hasattr(self, "roi_grid_layout"):
+            return
+        while self.roi_grid_layout.count():
+            item = self.roi_grid_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.roi_labels = {}
+        self.roi_buttons = {}
+        method = self.current_buy_method
+        for row, name in enumerate(self.settings.get_roi_names(method)):
+            pretty = name.replace("_", " ").title()
+            title_label = QLabel(pretty)
+            label = QLabel(self._roi_to_text(self.settings.get_roi(name, method)))
+            button = QPushButton(f"Select {pretty} ROI")
+            button.clicked.connect(lambda _, roi_name=name, roi_method=method: self._handle_roi_selection(roi_method, roi_name))
+            self.roi_grid_layout.addWidget(title_label, row, 0)
+            self.roi_grid_layout.addWidget(label, row, 1)
+            self.roi_grid_layout.addWidget(button, row, 2)
+            self.roi_labels[name] = label
+            self.roi_buttons[name] = button
 
     # ------------------------------------------------------------- debug panel
     def _toggle_debug_panel(self, checked: bool) -> None:
@@ -404,8 +449,13 @@ class MainWindow(QMainWindow):
         text = (message or "").strip()
         if not text:
             return
-        timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")
-        self.debug_text.append(f"[{timestamp}] {text}")
+        epoch = time.time()
+        timestamp = QDateTime.fromMSecsSinceEpoch(int(epoch * 1000)).toString("yyyy-MM-dd HH:mm:ss.zzz")
+        entry = f"[{timestamp}] {text}"
+        self._debug_history.append((epoch, entry))
+        self.debug_text.append(entry)
+        self.debug_text.verticalScrollBar().setValue(self.debug_text.verticalScrollBar().maximum())
+        self._prune_debug_buffer(self._debug_history, self.debug_text)
 
     def _handle_worker_status(self, status: str) -> None:
         self.status_label.setText(status)
@@ -419,16 +469,30 @@ class MainWindow(QMainWindow):
         state = payload.get("state") or ""
         message = payload.get("message") or ""
         dt = QDateTime.fromMSecsSinceEpoch(int(timestamp * 1000))
-        self.debug_detail_edit.append(f"[{dt.toString('HH:mm:ss.zzz')}] {state}: {message}")
+        entry = f"[{dt.toString('HH:mm:ss.zzz')}] {state}: {message}"
+        self._debug_detail_history.append((timestamp, entry))
+        self.debug_detail_edit.append(entry)
         self.debug_detail_edit.verticalScrollBar().setValue(self.debug_detail_edit.verticalScrollBar().maximum())
+        self._prune_debug_buffer(self._debug_detail_history, self.debug_detail_edit)
 
     def _clear_debug_table(self) -> None:
+        self._debug_detail_history.clear()
         self.debug_detail_edit.clear()
+
+    def _prune_debug_buffer(self, buffer, widget: QTextEdit) -> None:
+        cutoff = time.time() - self._debug_retention_seconds
+        removed = False
+        while buffer and buffer[0][0] < cutoff:
+            buffer.popleft()
+            removed = True
+        if removed:
+            widget.setPlainText("\n".join(entry for _, entry in buffer))
+            widget.verticalScrollBar().setValue(widget.verticalScrollBar().maximum())
 
     def _poll_balance_roi(self) -> None:
         if not check_tesseract_available():
             return
-        roi = self.settings.get_roi("balance")
+        roi = self.settings.get_roi("balance", method=self.current_buy_method)
         if not roi:
             return
         try:
@@ -438,8 +502,8 @@ class MainWindow(QMainWindow):
             return
         if raw_value is None:
             return
-        text_sample = raw[0] if raw else ""
-        multiplier = 1_000 if "K" in text_sample.upper() else 1
+        text_sample = (raw[0] if raw else "").upper()
+        multiplier = 1_000 if "K" in text_sample else 1
         self._set_current_balance_value(raw_value * multiplier, persist=True)
 
     # ------------------------------------------------------- target window UI
@@ -479,14 +543,50 @@ class MainWindow(QMainWindow):
         self.settings.set_target_window(text)
         self._update_start_button_state()
 
+    def _on_buy_method_changed(self, text: str) -> None:
+        if self._loading_settings:
+            return
+        method = text.lower()
+        self.settings.set_buy_method(method)
+        self.current_buy_method = method
+        self._update_buy_method_ui()
+        self._update_start_button_state()
+        self._append_debug_line(f"Buy method set to {text}.")
+
+    def _update_buy_method_ui(self) -> None:
+        simple = self.current_buy_method != "bulk"
+        self.simple_form_box.setVisible(simple)
+        self.bulk_form_box.setVisible(not simple)
+        self._populate_roi_grid()
+        self._update_bulk_target_price()
+
+    def _handle_bulk_value_change(self, key: str, value: float) -> None:
+        if self._loading_settings:
+            return
+        self.settings.set_numeric_value(key, value)
+        self._update_bulk_target_price()
+        self._update_start_button_state()
+
+    def _update_bulk_target_price(self) -> None:
+        target = self.bulk_max_price_spin.value() * self.bulk_buy_amount_spin.value()
+        self.bulk_target_price_label.setText(self._format_money(target))
+
     # --------------------------------------------------------------- validators
     def _update_start_button_state(self) -> None:
-        ready = (
-            self.settings.all_rois_ready()
-            and self.min_price_spin.value() > 0
-            and self.max_price_spin.value() >= self.min_price_spin.value()
-            and bool(self.target_combo.currentText().strip())
-        )
+        method = self.current_buy_method
+        if method == "bulk":
+            ready = (
+                self.settings.all_rois_ready(method)
+                and self.bulk_max_price_spin.value() > 0
+                and self.bulk_buy_amount_spin.value() > 0
+                and bool(self.target_combo.currentText().strip())
+            )
+        else:
+            ready = (
+                self.settings.all_rois_ready(method)
+                and self.max_price_spin.value() > 0
+                and bool(self.target_combo.currentText().strip())
+            )
         self.start_button.setEnabled(ready and self.worker is None)
         self.stop_button.setEnabled(self.worker is not None)
 
@@ -543,24 +643,27 @@ class MainWindow(QMainWindow):
             lbl.setText(values.get(key, "0"))
 
     # --------------------------------------------------------------- ROI logic
-    def _handle_roi_selection(self, name: str) -> None:
+    def _handle_roi_selection(self, method: str, name: str) -> None:
         if self._active_overlay:
             return
         overlay = RoiCaptureOverlay()
-        overlay.roi_selected.connect(lambda rect, roi_name=name: self._on_roi_selected(roi_name, rect))
+        overlay.roi_selected.connect(
+            lambda rect, roi_name=name, roi_method=method: self._on_roi_selected(roi_method, roi_name, rect)
+        )
         overlay.selection_cancelled.connect(self._on_roi_cancelled)
         overlay.destroyed.connect(self._release_overlay)
         self._active_overlay = overlay
         overlay.start()
 
-    def _save_roi(self, name: str, rect) -> None:
-        self.settings.set_roi(name, rect)
-        self._refresh_roi_labels()
-        self.status_label.setText(f"{name.title()} ROI updated")
+    def _save_roi(self, method: str, name: str, rect) -> None:
+        self.settings.set_roi(name, rect, method=method)
+        if method == self.current_buy_method and name in self.roi_labels:
+            self.roi_labels[name].setText(self._roi_to_text(rect))
+        self.status_label.setText(f"{name.replace('_', ' ').title()} ROI updated")
         self._update_start_button_state()
 
-    def _on_roi_selected(self, name: str, rect) -> None:
-        self._save_roi(name, rect)
+    def _on_roi_selected(self, method: str, name: str, rect) -> None:
+        self._save_roi(method, name, rect)
         self._release_overlay()
 
     def _on_roi_cancelled(self) -> None:
@@ -575,12 +678,19 @@ class MainWindow(QMainWindow):
     def _on_start(self) -> None:
         if self.worker is not None:
             return
-        if not self.settings.all_rois_ready():
+        buy_method = self.buy_method_combo.currentText().lower()
+        self.current_buy_method = buy_method
+        if not self.settings.all_rois_ready(buy_method):
             QMessageBox.warning(self, "Missing ROI", "Please configure every ROI before starting.")
             return
-        if self.max_price_spin.value() < self.min_price_spin.value():
-            QMessageBox.warning(self, "Invalid range", "Max price must be >= Min price.")
-            return
+        if buy_method == "bulk":
+            if self.bulk_max_price_spin.value() <= 0 or self.bulk_buy_amount_spin.value() <= 0:
+                QMessageBox.warning(self, "Invalid bulk values", "Bulk Max Price and Buy Amount must be greater than zero.")
+                return
+        else:
+            if self.max_price_spin.value() <= 0:
+                QMessageBox.warning(self, "Invalid price", "Max price must be greater than zero.")
+                return
         target_window = self.target_combo.currentText().strip()
         if not target_window:
             QMessageBox.warning(self, "Target window", "Please pick the application window the bot should control.")
@@ -595,9 +705,14 @@ class MainWindow(QMainWindow):
             return
 
         delays = self.settings.get_delays()
+        max_price = (
+            self.max_price_spin.value()
+            if buy_method == "simple"
+            else self.bulk_max_price_spin.value()
+        )
+        buy_amount = self.bulk_buy_amount_spin.value() if buy_method == "bulk" else 1.0
         params = BotParams(
-            min_price=self.min_price_spin.value(),
-            max_price=self.max_price_spin.value(),
+            max_price=max_price,
             current_balance=self.current_balance_spin.value(),
             balance_floor=self.balance_floor_spin.value(),
             target_window_title=target_window,
@@ -610,8 +725,11 @@ class MainWindow(QMainWindow):
                 "overlay_dismiss_click_ms", DEFAULT_DELAYS["overlay_dismiss_click_ms"]
             ),
             post_overlay_wait_ms=delays.get("post_overlay_wait_ms", DEFAULT_DELAYS["post_overlay_wait_ms"]),
+            buy_method=buy_method,
+            buy_amount=buy_amount,
         )
-        rois = {name: self.settings.get_roi(name) for name in ROI_ORDER}
+        roi_names = self.settings.get_roi_names(buy_method)
+        rois = {name: self.settings.get_roi(name, method=buy_method) for name in roi_names}
         assert all(rois.values())
         self.worker = BotWorker(rois=rois, params=params, trade_logger=self.trade_logger)
         self.worker.status_changed.connect(self._handle_worker_status)

@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
 ROIName = str
-ROI_ORDER: Tuple[ROIName, ...] = ("item", "price", "total", "max", "buy", "close", "balance")
+ROI_GROUPS: Dict[str, Tuple[ROIName, ...]] = {
+    "simple": ("item", "price", "total", "max", "buy", "close", "balance"),
+    "bulk": ("confirm", "cancel", "buy", "balance", "price"),
+}
+DEFAULT_METHOD = "simple"
 DEFAULT_DELAYS: Dict[str, int] = {
     "item_wait_ms": 400,
     "close_to_item_ms": 350,
@@ -25,12 +29,15 @@ class SettingsManager:
         self.base_dir = Path(base_dir)
         self.path = self.base_dir / "settings.json"
         self._data: Dict[str, object] = {
-            "rois": {name: None for name in ROI_ORDER},
+            "rois": {method: {name: None for name in names} for method, names in ROI_GROUPS.items()},
             "min_price": 0.0,
             "max_price": 0.0,
             "balance_floor": 0.0,
             "current_balance": 0.0,
             "target_window": "",
+            "buy_method": "simple",
+            "bulk_max_price": 0.0,
+            "bulk_buy_amount": 1.0,
             "delays": DEFAULT_DELAYS.copy(),
         }
         self.load()
@@ -50,17 +57,32 @@ class SettingsManager:
             self.save()
             return
 
-        rois = raw.get("rois", {})
-        parsed_rois: Dict[ROIName, Optional[Tuple[int, int, int, int]]] = {
-            name: self._normalize_roi(rois.get(name))
-            for name in ROI_ORDER
-        }
+        raw_rois = raw.get("rois", {})
+        parsed_rois: Dict[str, Dict[ROIName, Optional[Tuple[int, int, int, int]]]] = {}
+        if all(isinstance(raw_rois.get(method), dict) for method in ROI_GROUPS):
+            for method, names in ROI_GROUPS.items():
+                parsed_rois[method] = {
+                    name: self._normalize_roi(raw_rois.get(method, {}).get(name))
+                    for name in names
+                }
+        else:
+            # Legacy flat structure -> map into simple group
+            parsed_rois["simple"] = {
+                name: self._normalize_roi(raw_rois.get(name))
+                for name in ROI_GROUPS["simple"]
+            }
+            for method, names in ROI_GROUPS.items():
+                if method == "simple":
+                    continue
+                parsed_rois[method] = {name: None for name in names}
         self._data["rois"] = parsed_rois
-        self._data["min_price"] = float(raw.get("min_price", 0.0))
         self._data["max_price"] = float(raw.get("max_price", 0.0))
         self._data["balance_floor"] = float(raw.get("balance_floor", 0.0))
         self._data["current_balance"] = float(raw.get("current_balance", 0.0))
         self._data["target_window"] = str(raw.get("target_window", "")).strip()
+        self._data["buy_method"] = str(raw.get("buy_method", "simple")).lower()
+        self._data["bulk_max_price"] = float(raw.get("bulk_max_price", 0.0))
+        self._data["bulk_buy_amount"] = float(raw.get("bulk_buy_amount", 1.0))
         delays = raw.get("delays") or {}
         parsed_delays = DEFAULT_DELAYS.copy()
         for key, default_val in DEFAULT_DELAYS.items():
@@ -79,14 +101,20 @@ class SettingsManager:
     def save(self) -> None:
         payload = {
             "rois": {
-                name: list(value) if value else None
-                for name, value in self._data["rois"].items()
+                method: {
+                    name: list(value) if value else None
+                    for name, value in group.items()
+                }
+                for method, group in self._data["rois"].items()
             },
-            "min_price": self._data["min_price"],
+            "min_price": self._data.get("min_price", 0.0),
             "max_price": self._data["max_price"],
             "balance_floor": self._data["balance_floor"],
             "current_balance": self._data["current_balance"],
             "target_window": self._data["target_window"],
+            "buy_method": self._data["buy_method"],
+            "bulk_max_price": self._data["bulk_max_price"],
+            "bulk_buy_amount": self._data["bulk_buy_amount"],
             "delays": self._data["delays"],
         }
         tmp_path = self.path.with_suffix(".tmp")
@@ -107,30 +135,42 @@ class SettingsManager:
             return None
         return (x, y, w, h)
 
+    def _normalize_method(self, method: Optional[str] = None) -> str:
+        method = (method or self.get_buy_method()).lower()
+        return method if method in ROI_GROUPS else DEFAULT_METHOD
+
+    def get_roi_names(self, method: Optional[str] = None) -> Tuple[ROIName, ...]:
+        method = self._normalize_method(method)
+        return ROI_GROUPS[method]
+
     # ------------------------------------------------------------- public API
-    def get_roi(self, name: ROIName) -> Optional[Tuple[int, int, int, int]]:
-        return self._data["rois"].get(name)
+    def get_roi(self, name: ROIName, method: Optional[str] = None) -> Optional[Tuple[int, int, int, int]]:
+        method = self._normalize_method(method)
+        return self._data["rois"][method].get(name)
 
-    def set_roi(self, name: ROIName, rect: Tuple[int, int, int, int]) -> None:
-        if name not in ROI_ORDER:
-            raise KeyError(f"Unknown ROI '{name}'")
-        self._data["rois"][name] = tuple(map(int, rect))
+    def set_roi(self, name: ROIName, rect: Tuple[int, int, int, int], method: Optional[str] = None) -> None:
+        method = self._normalize_method(method)
+        if name not in ROI_GROUPS[method]:
+            raise KeyError(f"Unknown ROI '{name}' for method '{method}'")
+        self._data["rois"][method][name] = tuple(map(int, rect))
         self.save()
 
-    def reset_roi(self, name: ROIName) -> None:
-        if name not in ROI_ORDER:
-            raise KeyError(f"Unknown ROI '{name}'")
-        self._data["rois"][name] = None
+    def reset_roi(self, name: ROIName, method: Optional[str] = None) -> None:
+        method = self._normalize_method(method)
+        if name not in ROI_GROUPS[method]:
+            raise KeyError(f"Unknown ROI '{name}' for method '{method}'")
+        self._data["rois"][method][name] = None
         self.save()
 
-    def all_rois_ready(self) -> bool:
-        return all(self.get_roi(name) for name in ROI_ORDER)
+    def all_rois_ready(self, method: Optional[str] = None) -> bool:
+        method = self._normalize_method(method)
+        return all(self.get_roi(name, method) for name in ROI_GROUPS[method])
 
     def numeric_value(self, key: str) -> float:
         return float(self._data.get(key, 0.0))
 
     def set_numeric_value(self, key: str, value: float) -> None:
-        if key not in ("min_price", "max_price", "balance_floor", "current_balance"):
+        if key not in ("min_price", "max_price", "balance_floor", "current_balance", "bulk_max_price", "bulk_buy_amount"):
             raise KeyError(key)
         self._data[key] = float(value)
         self.save()
@@ -140,6 +180,13 @@ class SettingsManager:
 
     def set_target_window(self, title: str) -> None:
         self._data["target_window"] = title.strip()
+        self.save()
+
+    def get_buy_method(self) -> str:
+        return str(self._data.get("buy_method", "simple"))
+
+    def set_buy_method(self, method: str) -> None:
+        self._data["buy_method"] = method.strip().lower()
         self.save()
 
     # ----------------------------------------------------------- delays
@@ -159,14 +206,18 @@ class SettingsManager:
 
     def as_dict(self) -> Dict[str, object]:
         return {
-            "rois": self._data["rois"].copy(),
+            "rois": {method: group.copy() for method, group in self._data["rois"].items()},
             "min_price": self._data["min_price"],
             "max_price": self._data["max_price"],
             "balance_floor": self._data["balance_floor"],
             "current_balance": self._data["current_balance"],
             "target_window": self._data["target_window"],
+            "buy_method": self._data["buy_method"],
+            "bulk_max_price": self._data["bulk_max_price"],
+            "bulk_buy_amount": self._data["bulk_buy_amount"],
             "delays": self._data["delays"].copy(),
         }
 
-    def missing_roi_names(self) -> Iterable[ROIName]:
-        return (name for name in ROI_ORDER if self.get_roi(name) is None)
+    def missing_roi_names(self, method: Optional[str] = None) -> Iterable[ROIName]:
+        method = self._normalize_method(method)
+        return (name for name in ROI_GROUPS[method] if self.get_roi(name, method) is None)

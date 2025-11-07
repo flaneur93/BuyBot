@@ -33,7 +33,6 @@ class BotState(enum.Enum):
 
 @dataclass
 class BotParams:
-    min_price: float
     max_price: float
     current_balance: float
     balance_floor: float
@@ -47,6 +46,8 @@ class BotParams:
     randomize_clicks: bool = True
     skip_buy: bool = False
     skip_max: bool = False
+    buy_method: str = "simple"
+    buy_amount: float = 1.0
 
 
 class BotWorker(QThread):
@@ -83,6 +84,11 @@ class BotWorker(QThread):
         self._overlay_dismiss_click_ms = max(1, params.overlay_dismiss_click_ms)
         self._post_overlay_wait_ms = params.post_overlay_wait_ms
         self._max_clicked = False
+        self._buy_method = params.buy_method.lower()
+        self._pending_confirm_delay = False
+        self._buy_method = params.buy_method.lower()
+        self._debug_enabled = True
+        self._buy_method = params.buy_method
 
     # --------------------------------------------------------------- lifecycle
     def stop(self) -> None:
@@ -117,7 +123,7 @@ class BotWorker(QThread):
         while not self._stop_event.is_set() and time.time() < deadline:
             time.sleep(0.01)
 
-    def _click_roi(self, name: str, *, force_center: bool = False) -> bool:
+    def _click_roi(self, name: str, *, force_center: bool = False, pre_click_delay_ms: int = 0) -> bool:
         if not self._ensure_target_window():
             return False
         rect = self._rois.get(name)
@@ -132,7 +138,10 @@ class BotWorker(QThread):
             else:
                 target_x = x + w / 2
                 target_y = y + h / 2
-            pyautogui.click(target_x, target_y)
+            pyautogui.moveTo(target_x, target_y)
+            if pre_click_delay_ms > 0:
+                self._sleep_ms(pre_click_delay_ms)
+            pyautogui.click()
             self._emit_debug(f"CLICK {name} ({target_x:.0f}, {target_y:.0f})")
             return True
         except pyautogui.FailSafeException:
@@ -237,19 +246,22 @@ class BotWorker(QThread):
     # ------------------------------------------------------------------ thread
     def run(self) -> None:
         try:
-            self._main_loop()
+            if self._buy_method == "bulk":
+                self._bulk_loop()
+            else:
+                self._simple_loop()
         except Exception as exc:  # noqa: BLE001
             self.critical_error.emit(str(exc))
         finally:
             self.status_changed.emit("IDLE")
             self._emit_debug("STATE -> IDLE")
 
-    def _main_loop(self) -> None:
+    def _simple_loop(self) -> None:
         self.status_changed.emit("IDLE")
         self._emit_debug("STATE -> IDLE")
         while not self._stop_event.is_set():
             if not self._ensure_target_window():
-                self._sleep_ms(250)
+                self._sleep_ms(100)
                 continue
             if self._state == BotState.IDLE:
                 start_loop = time.perf_counter()
@@ -282,7 +294,7 @@ class BotWorker(QThread):
                     continue
                 self._latest_price = price
                 self._latest_total_price = None
-                if price < self._params.min_price or price > self._params.max_price:
+                if price > self._params.max_price:
                     self._set_state(BotState.OUT_OF_RANGE_CLOSE)
                 else:
                     self._set_state(BotState.IN_RANGE_EXECUTE)
@@ -343,7 +355,7 @@ class BotWorker(QThread):
                 price = self._read_price(attempts=1)
                 if price is not None:
                     self._latest_price = price
-                    if price < self._params.min_price or price > self._params.max_price:
+                    if price > self._params.max_price:
                         self._emit_debug("Price left range during BUY spam, closing.")
                         self._click_roi("close")
                         if self._close_to_item_ms > 0:
@@ -368,4 +380,58 @@ class BotWorker(QThread):
                 continue
 
         self.status_changed.emit("STOPPED")
+        self._emit_debug("STATE -> STOPPED")
+
+    def _bulk_loop(self) -> None:
+        self.status_changed.emit("BULK_READY")
+        target_price = self._params.max_price * max(1.0, self._params.buy_amount)
+        self._emit_debug(f"BULK target price {self._format_money(target_price)}")
+        while not self._stop_event.is_set():
+            if not self._ensure_target_window():
+                self._sleep_ms(200)
+                continue
+            pre_delay = 250 if self._pending_confirm_delay else 0
+            self._pending_confirm_delay = False
+            if not self._click_roi("confirm", pre_click_delay_ms=pre_delay):
+                self._sleep_ms(self._params.loop_delay_ms)
+                continue
+            if self._item_wait_ms > 0:
+                self._sleep_ms(self._item_wait_ms)
+            price = self._read_price(attempts=1)
+            attempts_remaining = 2
+            while price is None and attempts_remaining > 0 and not self._stop_event.is_set():
+                self._sleep_ms(self._params.action_delay_ms // 2 or 1)
+                price = self._read_price(attempts=1)
+                attempts_remaining -= 1
+            if price is None:
+                self._emit_debug("BULK price read failed; retrying from confirm.")
+                self._click_roi("cancel")
+                self._sleep_ms(self._params.action_delay_ms)
+                self._pending_confirm_delay = True
+                continue
+            if price > target_price:
+                self._emit_debug(
+                    "BULK price above target",
+                    {"price": self._format_money(price), "target": self._format_money(target_price)},
+                )
+                self._click_roi("cancel")
+                self._sleep_ms(self._params.action_delay_ms)
+                self._sleep_ms(self._params.action_delay_ms)
+                self._pending_confirm_delay = True
+                continue
+            if self._click_roi("buy"):
+                unit_price = price / max(1.0, self._params.buy_amount)
+                self._emit_debug(
+                    "BULK_BUY_EXECUTED",
+                    {
+                        "unit_price": self._format_money(unit_price),
+                        "total_price": self._format_money(price),
+                    },
+                )
+                self._log_trade(unit_price, price)
+                self.status_changed.emit("BUY_PLACED")
+                break
+            self._sleep_ms(self._params.action_delay_ms)
+        self.status_changed.emit("STOPPED")
+        self._emit_debug("BULK loop finished")
         self._emit_debug("STATE -> STOPPED")
