@@ -19,6 +19,7 @@ DEFAULT_DELAYS: Dict[str, int] = {
     "close_to_item_ms": 350,
     "overlay_dismiss_click_ms": 1,
     "post_overlay_wait_ms": 150,
+    "click_delay_ms": 0,
 }
 
 

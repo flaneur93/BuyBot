@@ -104,6 +104,7 @@ class MainWindow(QMainWindow):
                 "Pause after BUY to avoid overwhelming the UI.",
             ),
             ("post_overlay_wait_ms", "Post-overlay wait (ms)", "Pause before re-checking price during spam clicks."),
+            ("click_delay_ms", "Click hover delay (ms)", "Extra wait after moving onto an ROI before clicking."),
         ]
 
         self._build_ui()
@@ -727,6 +728,7 @@ class MainWindow(QMainWindow):
             post_overlay_wait_ms=delays.get("post_overlay_wait_ms", DEFAULT_DELAYS["post_overlay_wait_ms"]),
             buy_method=buy_method,
             buy_amount=buy_amount,
+            click_delay_ms=delays.get("click_delay_ms", DEFAULT_DELAYS["click_delay_ms"]),
         )
         roi_names = self.settings.get_roi_names(buy_method)
         rois = {name: self.settings.get_roi(name, method=buy_method) for name in roi_names}

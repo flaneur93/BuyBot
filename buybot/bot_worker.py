@@ -48,6 +48,7 @@ class BotParams:
     skip_max: bool = False
     buy_method: str = "simple"
     buy_amount: float = 1.0
+    click_delay_ms: int = 0
 
 
 class BotWorker(QThread):
@@ -85,6 +86,7 @@ class BotWorker(QThread):
         self._post_overlay_wait_ms = params.post_overlay_wait_ms
         self._max_clicked = False
         self._buy_method = params.buy_method.lower()
+        self._click_delay_ms = max(0, params.click_delay_ms)
         self._pending_confirm_delay = False
         self._buy_method = params.buy_method.lower()
         self._debug_enabled = True
@@ -123,7 +125,7 @@ class BotWorker(QThread):
         while not self._stop_event.is_set() and time.time() < deadline:
             time.sleep(0.01)
 
-    def _click_roi(self, name: str, *, force_center: bool = False, pre_click_delay_ms: int = 0) -> bool:
+    def _click_roi(self, name: str, *, force_center: bool = False, extra_delay_ms: int = 0) -> bool:
         if not self._ensure_target_window():
             return False
         rect = self._rois.get(name)
@@ -139,8 +141,9 @@ class BotWorker(QThread):
                 target_x = x + w / 2
                 target_y = y + h / 2
             pyautogui.moveTo(target_x, target_y)
-            if pre_click_delay_ms > 0:
-                self._sleep_ms(pre_click_delay_ms)
+            pre_delay = max(0, self._click_delay_ms + extra_delay_ms)
+            if pre_delay > 0:
+                self._sleep_ms(pre_delay)
             pyautogui.click()
             self._emit_debug(f"CLICK {name} ({target_x:.0f}, {target_y:.0f})")
             return True
@@ -163,7 +166,10 @@ class BotWorker(QThread):
         offset = min(40, max(5, h // 2 if h > 0 else 10))
         target_y = y + h + offset
         try:
-            pyautogui.click(target_x, target_y)
+            pyautogui.moveTo(target_x, target_y)
+            if self._click_delay_ms > 0:
+                self._sleep_ms(self._click_delay_ms)
+            pyautogui.click()
             self._emit_debug(f"CLICK buffer ({target_x:.0f},{target_y:.0f})")
         except pyautogui.FailSafeException:
             self.status_changed.emit("FAILSAFE_TRIGGERED - stopping")
@@ -261,7 +267,7 @@ class BotWorker(QThread):
         self._emit_debug("STATE -> IDLE")
         while not self._stop_event.is_set():
             if not self._ensure_target_window():
-                self._sleep_ms(100)
+                self._sleep_ms(200)
                 continue
             if self._state == BotState.IDLE:
                 start_loop = time.perf_counter()
@@ -392,11 +398,16 @@ class BotWorker(QThread):
                 continue
             pre_delay = 250 if self._pending_confirm_delay else 0
             self._pending_confirm_delay = False
-            if not self._click_roi("confirm", pre_click_delay_ms=pre_delay):
+            if not self._click_roi("confirm", extra_delay_ms=pre_delay):
                 self._sleep_ms(self._params.loop_delay_ms)
                 continue
             if self._item_wait_ms > 0:
                 self._sleep_ms(self._item_wait_ms)
+            # Move cursor near cancel to be ready while OCR runs
+            cancel_rect = self._rois.get("cancel")
+            if cancel_rect:
+                cx, cy, cw, ch = cancel_rect
+                pyautogui.moveTo(cx + cw / 2, cy + ch / 2)
             price = self._read_price(attempts=1)
             attempts_remaining = 2
             while price is None and attempts_remaining > 0 and not self._stop_event.is_set():

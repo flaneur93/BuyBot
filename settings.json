@@ -58,10 +58,10 @@
         62
       ],
       "buy": [
-        1935,
-        1854,
-        591,
-        64
+        1936,
+        1864,
+        628,
+        56
       ],
       "balance": [
         3357,
@@ -70,25 +70,26 @@
         69
       ],
       "price": [
-        1954,
-        1644,
-        423,
-        56
+        2184,
+        1731,
+        338,
+        45
       ]
     }
   },
   "min_price": 0.0,
   "max_price": 6.0,
   "balance_floor": 3000000.0,
-  "current_balance": 1381000.0,
+  "current_balance": 1371000.0,
   "target_window": "Arena Breakout Infinite",
   "buy_method": "bulk",
   "bulk_max_price": 1.0,
-  "bulk_buy_amount": 940.0,
+  "bulk_buy_amount": 840.0,
   "delays": {
     "item_wait_ms": 100,
     "close_to_item_ms": 100,
     "overlay_dismiss_click_ms": 100,
-    "post_overlay_wait_ms": 100
+    "post_overlay_wait_ms": 100,
+    "click_delay_ms": 200
   }
 }

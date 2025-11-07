@@ -11,6 +11,7 @@ from PIL import Image, ImageFilter, ImageGrab, ImageOps
 import pytesseract
 
 Number = float
+TESS_CONFIG = "--psm 7 -c tessedit_char_whitelist=0123456789Kk,."
 
 
 def check_tesseract_available() -> bool:
@@ -32,7 +33,9 @@ def preprocess(image: Image.Image) -> Image.Image:
     """Boost contrast and denoise slightly to help OCR."""
     gray = ImageOps.grayscale(image)
     sharpened = gray.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
-    return ImageOps.autocontrast(sharpened)
+    boosted = ImageOps.autocontrast(sharpened)
+    binary = boosted.point(lambda p: 255 if p > 128 else 0, mode="1")
+    return binary.convert("L")
 
 
 def parse_numeric(text: str) -> Optional[Number]:
@@ -107,7 +110,7 @@ def read_price_average(roi: Sequence[int], attempts: int = 3) -> Tuple[Optional[
     raw_samples: List[str] = []
     for _ in range(attempts):
         frame = preprocess(capture_roi(roi))
-        text = pytesseract.image_to_string(frame, config="--psm 7")
+        text = pytesseract.image_to_string(frame, config=TESS_CONFIG)
         raw_samples.append(text.strip())
         value = parse_numeric(text)
         if value is not None:
