@@ -426,25 +426,29 @@ class BotWorker(QThread):
                 self._pending_confirm_delay = True
                 continue
             price_digits = len(f"{int(price):d}")
-            if price_digits < target_digits - 1:
-                self._emit_debug(
-                    "BULK price digits mismatch",
-                    {"price": price, "digits": price_digits, "required": target_digits - 1},
-                )
-                self._click_roi("cancel")
-                self._sleep_ms(self._params.action_delay_ms)
-                self._pending_confirm_delay = True
-                continue
             if price > target_price:
                 self._emit_debug(
-                    "BULK price above target",
-                    {"price": self._format_money(price), "target": self._format_money(target_price)},
+                    "BULK cancel (price_above_target)",
+                    {
+                        "price": self._format_money(price),
+                        "digits": price_digits,
+                        "target": self._format_money(target_price),
+                    },
                 )
                 self._click_roi("cancel")
                 self._sleep_ms(self._params.action_delay_ms)
                 self._sleep_ms(self._params.action_delay_ms)
                 self._pending_confirm_delay = True
                 continue
+            if price_digits < target_digits - 1:
+                self._emit_debug(
+                    "BULK digits below expected, proceeding anyway",
+                    {
+                        "price": self._format_money(price),
+                        "digits": price_digits,
+                        "required_digits": target_digits - 1,
+                    },
+                )
             if self._click_roi("buy"):
                 unit_price = price / max(1.0, self._params.buy_amount)
                 self._emit_debug(
