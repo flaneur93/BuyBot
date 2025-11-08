@@ -49,6 +49,7 @@ class BotParams:
     buy_method: str = "simple"
     buy_amount: float = 1.0
     click_delay_ms: int = 0
+    check_price_delay_ms: int = 0
 
 
 class BotWorker(QThread):
@@ -88,6 +89,7 @@ class BotWorker(QThread):
         self._buy_method = params.buy_method.lower()
         self._click_delay_ms = max(0, params.click_delay_ms)
         self._pending_confirm_delay = False
+        self._check_price_delay_ms = max(0, params.check_price_delay_ms)
         self._buy_method = params.buy_method.lower()
         self._debug_enabled = True
         self._buy_method = params.buy_method
@@ -404,6 +406,8 @@ class BotWorker(QThread):
                 continue
             if self._item_wait_ms > 0:
                 self._sleep_ms(self._item_wait_ms)
+            if self._check_price_delay_ms > 0:
+                self._sleep_ms(self._check_price_delay_ms)
             # Move cursor near cancel to be ready while OCR runs
             cancel_rect = self._rois.get("cancel")
             if cancel_rect:
